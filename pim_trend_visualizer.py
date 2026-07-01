@@ -11,6 +11,7 @@ PIM 출원 동향 시각화 자동화 스크립트 - 디자인 개선 반영본
 
 실행 예시
 python pim_trend_visualizer.py --input "전데검완_등록.xlsx" --output "pim_visual_outputs"
+python pim_trend_visualizer.py --input "전데검완_등록.xlsx" --alias "출원인_삼성SK 출원인 중복.xlsx" --output "pim_visual_outputs"
 """
 
 from __future__ import annotations
@@ -222,7 +223,150 @@ def split_applicants(value: object) -> list[str]:
     return parts if parts else ["미상"]
 
 
-def preprocess(df: pd.DataFrame) -> pd.DataFrame:
+
+
+def make_applicant_key(value: object) -> str:
+    """
+    출원인명 비교용 키를 만든다.
+
+    목적:
+    - 대소문자 차이 제거
+    - 마침표/쉼표/공백 차이 완화
+    - Co., Ltd. / Inc. 같은 법인 표기 차이 완화
+
+    주의:
+    - 이 함수만으로 모든 회사를 자동 병합하지 않는다.
+    - 최종 병합 기준은 alias 엑셀에서 가져온 수동 매핑이다.
+    """
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    text = text.replace("㈜", "주식회사")
+    text = re.sub(r"\s+", " ", text)
+    text = text.upper()
+
+    # 비교를 어렵게 하는 기호 제거
+    text = re.sub(r"[\.,，·・ㆍ\(\)\[\]\{\}]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # 자주 등장하는 법인 표기 완화
+    removable_words = [
+        "CO", "LTD", "INC", "INCORPORATED", "CORPORATION", "CORP",
+        "COMPANY", "LIMITED", "LLC", "PLC",
+    ]
+    tokens = [t for t in text.split() if t not in removable_words]
+    return " ".join(tokens).strip()
+
+
+def read_applicant_alias_map(alias_path: Optional[Path]) -> dict[str, str]:
+    """
+    출원인명 alias 엑셀을 읽어서 {비교용키: 대표출원인명} 매핑을 만든다.
+
+    지원 형식 1: 권장 long 형식
+        대표출원인 | 출원인표기
+        Samsung Electronics | 삼성전자주식회사
+        Samsung Electronics | Samsung Electronics Co., Ltd.
+
+    지원 형식 2: 현재 사용 중인 wide-pair 형식
+        A열: 삼성전자 alias 목록, B열: 삼성전자 원자료 나열
+        C열: SK hynix alias 목록, D열: SK hynix 원자료 나열
+        E열: Intel alias 목록, F열: Intel 원자료 나열
+
+    wide-pair 형식에서는 각 2열 묶음의 왼쪽 열만 alias 기준으로 사용한다.
+    오른쪽 열은 원자료 검토용 목록으로 보고 매핑에는 사용하지 않는다.
+    """
+    if alias_path is None:
+        return {}
+
+    alias_path = Path(alias_path)
+    if not alias_path.exists():
+        raise FileNotFoundError(f"출원인 alias 엑셀 파일을 찾을 수 없습니다: {alias_path}")
+
+    alias_df = pd.read_excel(alias_path, sheet_name=0, header=None)
+    alias_df = alias_df.dropna(how="all").dropna(axis=1, how="all")
+
+    alias_map: dict[str, str] = {}
+
+    def add_alias(alias_value: object, canonical_value: object) -> None:
+        if pd.isna(alias_value) or pd.isna(canonical_value):
+            return
+        alias = str(alias_value).strip()
+        canonical = str(canonical_value).strip()
+        if not alias or not canonical:
+            return
+
+        # 합계/총계/숫자만 있는 행은 매핑에서 제외
+        if alias in {"합계", "총계", "TOTAL", "Total", "total"}:
+            return
+        if re.fullmatch(r"\d+(\.\d+)?", alias):
+            return
+
+        # 다중 출원인 결합 문자열은 원자료에서 split_applicants()로 먼저 분리되므로
+        # alias 매핑에서는 그대로 등록하지 않는다. 잘못하면 공동출원인을 특정 회사로 흡수할 수 있다.
+        if "|" in alias or ";" in alias:
+            return
+
+        key = make_applicant_key(alias)
+        if key:
+            alias_map[key] = canonical
+
+        canonical_key = make_applicant_key(canonical)
+        if canonical_key:
+            alias_map[canonical_key] = canonical
+
+    # long 형식 감지: 첫 행에 대표/표준/alias/출원인 같은 헤더가 있는 경우
+    first_row_values = [str(v).strip() for v in alias_df.iloc[0].tolist() if pd.notna(v)]
+    header_text = " ".join(first_row_values)
+    looks_like_long = (
+        len(alias_df.columns) >= 2
+        and any(word in header_text for word in ["대표", "표준", "canonical", "Canonical"])
+        and any(word in header_text for word in ["alias", "Alias", "표기", "출원인"])
+    )
+
+    if looks_like_long:
+        long_df = pd.read_excel(alias_path, sheet_name=0)
+        columns = list(long_df.columns)
+        canonical_col = next(
+            (c for c in columns if any(k in str(c) for k in ["대표", "표준", "canonical", "Canonical"])),
+            columns[0],
+        )
+        alias_col = next(
+            (c for c in columns if any(k in str(c) for k in ["alias", "Alias", "표기", "출원인"])),
+            columns[1],
+        )
+        for _, row in long_df.iterrows():
+            add_alias(row[alias_col], row[canonical_col])
+    else:
+        # wide-pair 형식: 0,2,4...번째 열을 alias 열로 사용하고, 오른쪽 열은 검토용 원자료로 무시
+        col_count = len(alias_df.columns)
+        for col_idx in range(0, col_count, 2):
+            series = alias_df.iloc[:, col_idx].dropna()
+            series = series[series.astype(str).str.strip() != ""]
+            if series.empty:
+                continue
+
+            canonical = str(series.iloc[0]).strip()
+            for alias in series:
+                add_alias(alias, canonical)
+
+    print(f"[INFO] 출원인 alias 매핑 수: {len(alias_map):,}")
+    return alias_map
+
+
+def normalize_applicant_name(value: object, alias_map: dict[str, str]) -> str:
+    """출원인명을 alias 매핑 기준 대표출원인명으로 바꾼다."""
+    if pd.isna(value):
+        return "미상"
+
+    original = str(value).strip()
+    if not original:
+        return "미상"
+
+    key = make_applicant_key(original)
+    return alias_map.get(key, original)
+
+def preprocess(df: pd.DataFrame, alias_map: Optional[dict[str, str]] = None) -> pd.DataFrame:
     required_cols = [config.COUNTRY_COL, config.DATE_COL, config.APPLICANT_COL]
     missing = [col for col in required_cols if col not in df.columns]
     if missing:
@@ -247,8 +391,11 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     else:
         data["출원인_정규화"] = data[config.APPLICANT_COL]
 
-    data["출원인_정규화"] = data["출원인_정규화"].fillna("미상").astype(str).str.strip()
-    data = data[data["출원인_정규화"] != ""].copy()
+    data["출원인_원문"] = data["출원인_정규화"].fillna("미상").astype(str).str.strip()
+    data = data[data["출원인_원문"] != ""].copy()
+
+    alias_map = alias_map or {}
+    data["출원인_정규화"] = data["출원인_원문"].apply(lambda x: normalize_applicant_name(x, alias_map))
 
     return data
 
@@ -318,6 +465,26 @@ def save_summary_tables(tables: dict[str, pd.DataFrame], output_dir: Path) -> No
     for name, table in tables.items():
         table.to_csv(table_dir / f"{name}.csv", index=False, encoding="utf-8-sig")
 
+
+
+
+def save_applicant_normalization_audit(data: pd.DataFrame, output_dir: Path) -> None:
+    """출원인명 정규화가 어떻게 적용됐는지 검토용 CSV를 저장한다."""
+    if not config.SAVE_CSV_TABLES:
+        return
+    if "출원인_원문" not in data.columns:
+        return
+
+    table_dir = output_dir / "tables"
+    table_dir.mkdir(parents=True, exist_ok=True)
+
+    audit = (
+        data.groupby(["출원인_원문", "출원인_정규화"])
+        .size()
+        .reset_index(name="출원건수")
+        .sort_values(["출원인_정규화", "출원건수"], ascending=[True, False])
+    )
+    audit.to_csv(table_dir / "applicant_normalization_audit.csv", index=False, encoding="utf-8-sig")
 
 # ============================================================
 # 4. 그래프 함수
@@ -410,9 +577,10 @@ def plot_country_bar(country_counts: pd.DataFrame) -> plt.Figure:
 
     add_horizontal_bar_labels(ax, top["출원건수"], total=total)
 
+    # title=f"국가코드별 출원 비중 TOP {config.TOP_N_COUNTRIES}",
     polish_axes(
         ax,
-        title=f"국가코드별 출원 비중 TOP {config.TOP_N_COUNTRIES}",
+        title=f"국가코드별 출원 비중",
         subtitle="막대 길이는 출원 건수, 괄호 안 수치는 전체 대비 비율",
         xlabel="출원 건수",
         ylabel="국가코드",
@@ -442,8 +610,8 @@ def plot_applicant_bar(applicant_counts: pd.DataFrame) -> plt.Figure:
 
     polish_axes(
         ax,
-        title=f"상위 {config.TOP_N_APPLICANTS}개 출원인이 PIM/PNM 특허 출원을 주도",
-        subtitle="출원인 명칭 기준 단순 집계. 계열사·표기 차이는 별도 정규화 필요",
+        title=f"상위 {config.TOP_N_APPLICANTS}개 출원인이 PIM/PNM 특허 출원을 주도[출원인 명칭 정리 부족]",
+        # subtitle="출원인 명칭 기준 단순 집계. 계열사·표기 차이는 별도 정규화 필요",
         xlabel="출원 건수",
         ylabel="출원인",
         source="Data: WIPS 검색 결과 기반 자체 집계",
@@ -468,7 +636,7 @@ def plot_country_year_stacked_bar(country_year: pd.DataFrame, country_counts: pd
 
     polish_axes(
         ax,
-        title=f"연도별 출원 증가를 주도한 국가는 어디인가",
+        title=f"연도별 출원 증가를 주도한 국가는 어디인가[임시]",
         subtitle=f"상위 {config.TOP_N_COUNTRIES}개 국가코드 기준 누적 막대그래프",
         xlabel="출원연도",
         ylabel="출원 건수",
@@ -744,7 +912,7 @@ def generate_country_detail_charts(
         polish_axes(
             ax,
             title=f"국가코드 {country}: 연도별 PIM/PNM 출원 동향",
-            subtitle="국가별 상세 추이 반복 생성 그래프",
+            subtitle="국가별 상세 추이 그래프",
             xlabel="출원연도",
             ylabel="출원 건수",
             source="Data: WIPS 검색 결과 기반 자체 집계",
@@ -786,7 +954,7 @@ def generate_applicant_detail_charts(
         polish_axes(
             ax,
             title=f"출원인별 연도 추이: {shorten_label(applicant, 45)}",
-            subtitle="상위 출원인별 상세 추이 반복 생성 그래프",
+            subtitle="상위 출원인별 상세 추이 그래프",
             xlabel="출원연도",
             ylabel="출원 건수",
             source="Data: WIPS 검색 결과 기반 자체 집계",
@@ -799,7 +967,7 @@ def generate_applicant_detail_charts(
 # 6. 전체 실행
 # ============================================================
 
-def build_all_visuals(input_path: Path, output_dir: Path, sheet_name: Optional[str]) -> None:
+def build_all_visuals(input_path: Path, output_dir: Path, sheet_name: Optional[str], alias_path: Optional[Path] = None) -> None:
     apply_theme()
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -807,15 +975,19 @@ def build_all_visuals(input_path: Path, output_dir: Path, sheet_name: Optional[s
     image_dir.mkdir(parents=True, exist_ok=True)
 
     raw = read_excel_data(input_path, sheet_name)
-    data = preprocess(raw)
+    alias_map = read_applicant_alias_map(alias_path)
+    data = preprocess(raw, alias_map=alias_map)
     tables = make_summary_tables(data)
     save_summary_tables(tables, output_dir)
+    save_applicant_normalization_audit(data, output_dir)
 
     print(f"[INFO] 원본 행 수: {len(raw):,}")
     print(f"[INFO] 분석 행 수: {len(data):,}")
     print(f"[INFO] 출원연도 범위: {data['출원연도'].min()} ~ {data['출원연도'].max()}")
     print(f"[INFO] 국가 수: {data[config.COUNTRY_COL].nunique():,}")
-    print(f"[INFO] 출원인 수: {data['출원인_정규화'].nunique():,}")
+    print(f"[INFO] 정규화 후 출원인 수: {data['출원인_정규화'].nunique():,}")
+    if "출원인_원문" in data.columns:
+        print(f"[INFO] 정규화 전 출원인 표기 수: {data['출원인_원문'].nunique():,}")
 
     pdf_path = output_dir / config.PDF_FILENAME
     pdf_context = PdfPages(pdf_path) if config.SAVE_PDF else None
@@ -896,6 +1068,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=str, default=str(config.INPUT_EXCEL), help="입력 엑셀 파일 경로")
     parser.add_argument("--output", type=str, default=str(config.OUTPUT_DIR), help="출력 폴더 경로")
     parser.add_argument("--sheet", type=str, default=config.SHEET_NAME, help="사용할 시트명. 생략 시 첫 번째 시트 사용")
+    parser.add_argument(
+        "--alias",
+        type=str,
+        default=None,
+        help="출원인명 통합 기준 엑셀 파일 경로. 예: 출원인_삼성SK 출원인 중복.xlsx",
+    )
     return parser.parse_args()
 
 
@@ -905,4 +1083,5 @@ if __name__ == "__main__":
         input_path=Path(args.input),
         output_dir=Path(args.output),
         sheet_name=args.sheet,
+        alias_path=Path(args.alias) if args.alias else None,
     )
