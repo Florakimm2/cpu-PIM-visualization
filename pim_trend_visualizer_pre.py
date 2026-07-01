@@ -1,11 +1,11 @@
 """
-PIM 출원 동향 시각화 자동화 스크립트 - 디자인 개선 반영본
+PIM 출원 동향 시각화 자동화 스크립트
 
 기능
 1. 엑셀 데이터 자동 로드
 2. 국가코드 / 출원일 / 출원인 기준 집계
 3. 여러 그래프를 반복문으로 대량 생성
-4. style.py 기반 디자인 테마 통일
+4. 디자인 테마 통일
 5. 3D 그래프 생성
 6. PNG 이미지와 PDF 리포트 저장
 
@@ -19,13 +19,12 @@ import argparse
 import re
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
@@ -70,31 +69,35 @@ def set_korean_font() -> Optional[str]:
 
 
 def apply_theme() -> None:
-    """
-    전체 그래프의 디자인을 통일한다.
-
-    기존 config 기반 테마 대신 style.py의 apply_report_style()를 우선 적용한다.
-    다만 style.py에서 AppleGothic을 고정해둔 경우를 대비해, 사용 가능한 한글 폰트를
-    다시 찾아서 rcParams에 덮어쓴다.
-    """
+    """전체 그래프의 디자인을 통일한다."""
     font_name = set_korean_font()
-
-    try:
-        apply_report_style()
-    except Exception:
-        # style.py가 수정 중이거나 일부 환경에서 실패해도 기본 그래프는 생성되게 한다.
-        sns.set_theme(
-            style=getattr(config, "SEABORN_STYLE", "whitegrid"),
-            context=getattr(config, "SEABORN_CONTEXT", "talk"),
-        )
-
     if font_name:
-        plt.rcParams["font.family"] = font_name
-
-    plt.rcParams["axes.unicode_minus"] = False
-    plt.rcParams["figure.dpi"] = getattr(config, "FIG_DPI", 180)
-    plt.rcParams["savefig.dpi"] = getattr(config, "FIG_DPI", 180)
+        sns.set_theme(
+            style=config.SEABORN_STYLE,
+            context=config.SEABORN_CONTEXT,
+            font=font_name,
+        )
+    else:
+        sns.set_theme(
+            style=config.SEABORN_STYLE,
+            context=config.SEABORN_CONTEXT,
+        )
     plt.rcParams["axes.prop_cycle"] = plt.cycler(color=sns.color_palette("deep"))
+
+    plt.rcParams.update({
+        "figure.dpi": config.FIG_DPI,
+        "savefig.dpi": config.FIG_DPI,
+        "axes.titleweight": "bold",
+        "axes.labelweight": "bold",
+        "axes.titlesize": 17,
+        "axes.labelsize": 13,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 10,
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "grid.alpha": 0.35,
+    })
 
 
 def save_figure(
@@ -126,68 +129,6 @@ def annotate_bar_values(ax: plt.Axes, fmt: str = "{:.0f}") -> None:
             else:
                 labels.append(fmt.format(value))
         ax.bar_label(container, labels=labels, padding=3, fontsize=9)
-
-
-def shorten_label(text: object, max_len: int = 32) -> str:
-    """축 라벨이 너무 길 때 적당히 줄인다."""
-    value = str(text)
-    return value if len(value) <= max_len else value[:max_len - 1] + "…"
-
-
-def add_horizontal_bar_labels(
-    ax: plt.Axes,
-    values: pd.Series,
-    total: Optional[float] = None,
-    suffix: str = "건",
-) -> None:
-    """가로 막대 오른쪽에 값 또는 비율 라벨을 붙인다."""
-    max_value = float(values.max()) if len(values) else 0
-    offset = max_value * 0.015 if max_value else 0.1
-
-    for patch in ax.patches:
-        width = patch.get_width()
-        if total and total > 0:
-            label = f"{int(width)}{suffix} ({width / total * 100:.1f}%)"
-        else:
-            label = f"{int(width)}{suffix}"
-
-        ax.text(
-            width + offset,
-            patch.get_y() + patch.get_height() / 2,
-            label,
-            va="center",
-            ha="left",
-            fontsize=9,
-            color="#333333",
-        )
-
-    ax.set_xlim(0, max_value * 1.22 if max_value else 1)
-
-
-def style_heatmap_axis(ax: plt.Axes, title: str, subtitle: str, xlabel: str, ylabel: str) -> None:
-    """Heatmap 전용 제목/부제 스타일."""
-    ax.set_title(title, loc="left", pad=22, fontsize=18, fontweight="bold")
-    ax.text(
-        0,
-        1.02,
-        subtitle,
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=10,
-        color="#666666",
-    )
-    ax.set_xlabel(xlabel, labelpad=10)
-    ax.set_ylabel(ylabel, labelpad=10)
-
-
-def style_3d_axis(ax: plt.Axes) -> None:
-    """Matplotlib 3D 그래프를 조금 더 차분하게 보이도록 정리한다."""
-    for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
-        axis.pane.set_facecolor((0.98, 0.98, 0.98, 1.0))
-        axis.pane.set_edgecolor((0.86, 0.86, 0.86, 1.0))
-
-    ax.grid(True, alpha=0.25)
 
 
 # ============================================================
@@ -322,10 +263,9 @@ def save_summary_tables(tables: dict[str, pd.DataFrame], output_dir: Path) -> No
 # ============================================================
 # 4. 그래프 함수
 # ============================================================
-
-def plot_total_yearly_trend(yearly_counts: pd.DataFrame) -> plt.Figure:
-    """연도별 출원 추이: 막대 + 3년 이동평균 + 최고점 주석."""
-    df = yearly_counts.copy().sort_values("출원연도")
+def plot_yearly_trend_pretty(yearly_counts, output_path):
+    df = yearly_counts.copy()
+    df = df.sort_values("출원연도")
     df["이동평균"] = df["출원건수"].rolling(window=3, min_periods=1).mean()
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -334,8 +274,8 @@ def plot_total_yearly_trend(yearly_counts: pd.DataFrame) -> plt.Figure:
         df["출원연도"],
         df["출원건수"],
         width=0.72,
-        alpha=0.86,
-        label="연도별 출원 건수",
+        alpha=0.85,
+        label="연도별 출원 건수"
     )
 
     ax.plot(
@@ -343,27 +283,21 @@ def plot_total_yearly_trend(yearly_counts: pd.DataFrame) -> plt.Figure:
         df["이동평균"],
         linewidth=2.8,
         marker="o",
-        label="3년 이동평균",
+        label="3년 이동평균"
     )
 
-    if not df.empty:
-        max_row = df.loc[df["출원건수"].idxmax()]
-        ymax = max(float(df["출원건수"].max()), 1.0)
-        ax.annotate(
-            f"최고점: {int(max_row['출원연도'])}년\n{int(max_row['출원건수'])}건",
-            xy=(max_row["출원연도"], max_row["출원건수"]),
-            xytext=(max_row["출원연도"], ymax * 1.13),
-            ha="center",
-            fontsize=10,
-            arrowprops=dict(arrowstyle="->", lw=1.2),
-        )
+    max_row = df.loc[df["출원건수"].idxmax()]
+    ax.annotate(
+        f"최고점: {int(max_row['출원연도'])}년\n{int(max_row['출원건수'])}건",
+        xy=(max_row["출원연도"], max_row["출원건수"]),
+        xytext=(max_row["출원연도"], max_row["출원건수"] * 1.15),
+        ha="center",
+        fontsize=10,
+        arrowprops=dict(arrowstyle="->", lw=1.2)
+    )
 
-        # 2020년 이후 구간이 실제 데이터에 있을 때만 최근 구간을 은은하게 표시
-        if df["출원연도"].max() >= 2020:
-            ax.axvspan(2020, df["출원연도"].max(), alpha=0.08)
-
-        ax.set_ylim(0, ymax * 1.28)
-        ax.set_xticks(sorted(df["출원연도"].unique()))
+    if df["출원연도"].max() >= 2020:
+        ax.axvspan(2020, df["출원연도"].max(), alpha=0.08)
 
     polish_axes(
         ax,
@@ -371,7 +305,7 @@ def plot_total_yearly_trend(yearly_counts: pd.DataFrame) -> plt.Figure:
         subtitle="2010년 이후 공개·등록 특허 기준, 연도별 출원 건수 및 3년 이동평균",
         xlabel="출원연도",
         ylabel="출원 건수",
-        source="Data: WIPS 검색 결과 기반 자체 집계",
+        source="Data: WIPS 검색 결과 기반 자체 집계"
     )
 
     ax.legend(loc="upper left")
@@ -386,69 +320,51 @@ def plot_total_yearly_trend(yearly_counts: pd.DataFrame) -> plt.Figure:
                 ha="center",
                 va="bottom",
                 fontsize=8,
-                color="#444444",
+                color="#444444"
             )
 
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+'''
+def plot_total_yearly_trend(yearly_counts: pd.DataFrame) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+    sns.lineplot(
+        data=yearly_counts,
+        x="출원연도",
+        y="출원건수",
+        marker="o",
+        linewidth=2.5,
+        ax=ax,
+    )
+    ax.set_title("PIM 전체 출원 동향: 연도별 출원건수")
+    ax.set_xlabel("출원연도")
+    ax.set_ylabel("출원건수")
+    ax.set_xticks(sorted(yearly_counts["출원연도"].unique()))
+    for _, row in yearly_counts.iterrows():
+        ax.text(row["출원연도"], row["출원건수"], str(int(row["출원건수"])), ha="center", va="bottom", fontsize=9)
     return fig
-
+'''
 
 def plot_country_bar(country_counts: pd.DataFrame) -> plt.Figure:
-    """국가별 출원 건수: 가로 막대 + 점유율 라벨."""
     top = country_counts.head(config.TOP_N_COUNTRIES).copy()
-    top = top.sort_values("출원건수", ascending=True)
-    total = float(country_counts["출원건수"].sum())
-
     fig, ax = plt.subplots(figsize=config.FIGSIZE_MEDIUM)
-    sns.barplot(
-        data=top,
-        y=config.COUNTRY_COL,
-        x="출원건수",
-        ax=ax,
-        orient="h",
-        color=sns.color_palette("deep")[0],
-    )
-
-    add_horizontal_bar_labels(ax, top["출원건수"], total=total)
-
-    polish_axes(
-        ax,
-        title=f"국가코드별 출원 비중 TOP {config.TOP_N_COUNTRIES}",
-        subtitle="막대 길이는 출원 건수, 괄호 안 수치는 전체 대비 비율",
-        xlabel="출원 건수",
-        ylabel="국가코드",
-        source="Data: WIPS 검색 결과 기반 자체 집계",
-    )
-
+    sns.barplot(data=top, y=config.COUNTRY_COL, x="출원건수", ax=ax, color=sns.color_palette("deep")[0])
+    ax.set_title(f"국가코드별 출원건수 TOP {config.TOP_N_COUNTRIES}")
+    ax.set_xlabel("출원건수")
+    ax.set_ylabel("국가코드")
+    annotate_bar_values(ax)
     return fig
 
 
 def plot_applicant_bar(applicant_counts: pd.DataFrame) -> plt.Figure:
-    """주요 출원인 TOP 그래프: 긴 회사명에 맞춘 가로 막대."""
     top = applicant_counts.head(config.TOP_N_APPLICANTS).copy()
-    top = top.sort_values("출원건수", ascending=True)
-    top["출원인_표시"] = top["출원인_정규화"].apply(lambda x: shorten_label(x, 38))
-
-    fig, ax = plt.subplots(figsize=(13, 9))
-    sns.barplot(
-        data=top,
-        y="출원인_표시",
-        x="출원건수",
-        ax=ax,
-        orient="h",
-        color=sns.color_palette("deep")[1],
-    )
-
-    add_horizontal_bar_labels(ax, top["출원건수"], total=None)
-
-    polish_axes(
-        ax,
-        title=f"상위 {config.TOP_N_APPLICANTS}개 출원인이 PIM/PNM 특허 출원을 주도",
-        subtitle="출원인 명칭 기준 단순 집계. 계열사·표기 차이는 별도 정규화 필요",
-        xlabel="출원 건수",
-        ylabel="출원인",
-        source="Data: WIPS 검색 결과 기반 자체 집계",
-    )
-
+    fig, ax = plt.subplots(figsize=(14, 9))
+    sns.barplot(data=top, y="출원인_정규화", x="출원건수", ax=ax, color=sns.color_palette("deep")[1])
+    ax.set_title(f"주요 출원인별 출원건수 TOP {config.TOP_N_APPLICANTS}")
+    ax.set_xlabel("출원건수")
+    ax.set_ylabel("출원인")
+    annotate_bar_values(ax)
     return fig
 
 
@@ -465,17 +381,10 @@ def plot_country_year_stacked_bar(country_year: pd.DataFrame, country_counts: pd
 
     fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
     pivot.plot(kind="bar", stacked=True, ax=ax, width=0.82)
-
-    polish_axes(
-        ax,
-        title=f"연도별 출원 증가를 주도한 국가는 어디인가",
-        subtitle=f"상위 {config.TOP_N_COUNTRIES}개 국가코드 기준 누적 막대그래프",
-        xlabel="출원연도",
-        ylabel="출원 건수",
-        source="Data: WIPS 검색 결과 기반 자체 집계",
-    )
+    ax.set_title(f"연도별·국가코드별 출원건수: TOP {config.TOP_N_COUNTRIES} 국가")
+    ax.set_xlabel("출원연도")
+    ax.set_ylabel("출원건수")
     ax.legend(title="국가코드", bbox_to_anchor=(1.02, 1), loc="upper left")
-
     return fig
 
 
@@ -492,23 +401,10 @@ def plot_country_year_heatmap(country_year: pd.DataFrame, country_counts: pd.Dat
     pivot = pivot.loc[[c for c in top_countries if c in pivot.index]]
 
     fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
-    sns.heatmap(
-        pivot,
-        annot=True,
-        fmt=".0f",
-        linewidths=0.5,
-        cmap="YlGnBu",
-        ax=ax,
-        cbar_kws={"label": "출원 건수"},
-    )
-    style_heatmap_axis(
-        ax,
-        title="국가별 출원 집중 시점 비교",
-        subtitle="색이 진할수록 해당 국가·연도 조합의 출원 건수가 많음",
-        xlabel="출원연도",
-        ylabel="국가코드",
-    )
-
+    sns.heatmap(pivot, annot=True, fmt=".0f", linewidths=0.5, cmap="YlGnBu", ax=ax)
+    ax.set_title("국가코드 x 출원연도 출원건수 Heatmap")
+    ax.set_xlabel("출원연도")
+    ax.set_ylabel("국가코드")
     return fig
 
 
@@ -531,93 +427,12 @@ def plot_applicant_country_heatmap(
         fill_value=0,
     )
     pivot = pivot.reindex(index=top_applicants, columns=top_countries, fill_value=0)
-    pivot.index = [shorten_label(name, 36) for name in pivot.index]
 
     fig, ax = plt.subplots(figsize=(14, 9))
-    sns.heatmap(
-        pivot,
-        annot=True,
-        fmt=".0f",
-        linewidths=0.5,
-        cmap="Blues",
-        ax=ax,
-        cbar_kws={"label": "출원 건수"},
-    )
-    style_heatmap_axis(
-        ax,
-        title="주요 출원인의 국가별 포트폴리오 분포",
-        subtitle="상위 출원인과 상위 국가코드 기준 출원 건수 매트릭스",
-        xlabel="국가코드",
-        ylabel="출원인",
-    )
-
-    return fig
-
-
-def plot_applicant_country_bubble(
-    applicant_country: pd.DataFrame,
-    applicant_counts: pd.DataFrame,
-    country_counts: pd.DataFrame,
-) -> plt.Figure:
-    """출원인 x 국가코드 x 출원건수를 버블 매트릭스로 표현한다."""
-    top_applicants = applicant_counts.head(config.TOP_N_APPLICANTS_3D)["출원인_정규화"].tolist()
-    top_countries = country_counts.head(config.TOP_N_COUNTRIES_3D)[config.COUNTRY_COL].tolist()
-
-    plot_df = applicant_country[
-        applicant_country["출원인_정규화"].isin(top_applicants)
-        & applicant_country[config.COUNTRY_COL].isin(top_countries)
-    ].copy()
-
-    applicants = list(reversed(top_applicants))
-    countries = top_countries
-
-    applicant_map = {name: i for i, name in enumerate(applicants)}
-    country_map = {name: i for i, name in enumerate(countries)}
-
-    plot_df["x"] = plot_df[config.COUNTRY_COL].map(country_map)
-    plot_df["y"] = plot_df["출원인_정규화"].map(applicant_map)
-
-    fig, ax = plt.subplots(figsize=(12, 8))
-
-    max_count = plot_df["출원건수"].max() if not plot_df.empty else 1
-    sizes = 120 + (plot_df["출원건수"] / max_count) * 1700
-
-    ax.scatter(
-        plot_df["x"],
-        plot_df["y"],
-        s=sizes,
-        alpha=0.62,
-        edgecolors="white",
-        linewidth=1.4,
-    )
-
-    for _, row in plot_df.iterrows():
-        if row["출원건수"] >= 1:
-            ax.text(
-                row["x"],
-                row["y"],
-                str(int(row["출원건수"])),
-                ha="center",
-                va="center",
-                fontsize=8,
-                color="#222222",
-            )
-
-    ax.set_xticks(range(len(countries)))
-    ax.set_xticklabels(countries)
-    ax.set_yticks(range(len(applicants)))
-    ax.set_yticklabels([shorten_label(name, 34) for name in applicants])
-
-    polish_axes(
-        ax,
-        title="출원인별 국가 포트폴리오를 한눈에 비교",
-        subtitle="버블 크기는 해당 출원인의 국가별 출원 건수를 의미",
-        xlabel="국가코드",
-        ylabel="출원인",
-        source="Data: WIPS 검색 결과 기반 자체 집계",
-    )
-    ax.grid(True, alpha=0.25)
-
+    sns.heatmap(pivot, annot=True, fmt=".0f", linewidths=0.5, cmap="Blues", ax=ax)
+    ax.set_title("주요 출원인 x 국가코드 출원건수 Heatmap")
+    ax.set_xlabel("국가코드")
+    ax.set_ylabel("출원인")
     return fig
 
 
@@ -645,8 +460,8 @@ def plot_3d_country_year(country_year: pd.DataFrame, country_counts: pd.DataFram
     dx = np.full_like(xpos, 0.55, dtype=float)
     dy = np.full_like(ypos, 0.55, dtype=float)
 
-    ax.bar3d(xpos, ypos, zpos, dx, dy, dz, shade=True, alpha=0.82)
-    ax.set_title("3D 출원 동향: 출원연도 x 국가코드 x 출원건수", pad=20, fontweight="bold")
+    ax.bar3d(xpos, ypos, zpos, dx, dy, dz, shade=True, alpha=0.85)
+    ax.set_title("3D 출원 동향: 출원연도 x 국가코드 x 출원건수", pad=20)
     ax.set_xlabel("출원연도", labelpad=12)
     ax.set_ylabel("국가코드", labelpad=12)
     ax.set_zlabel("출원건수", labelpad=10)
@@ -655,8 +470,6 @@ def plot_3d_country_year(country_year: pd.DataFrame, country_counts: pd.DataFram
     ax.set_yticks(np.arange(len(top_countries)) + 0.27)
     ax.set_yticklabels(top_countries)
     ax.view_init(elev=25, azim=-55)
-    style_3d_axis(ax)
-
     return fig
 
 
@@ -692,18 +505,16 @@ def plot_3d_applicant_country(
     dx = np.full_like(xpos, 0.55, dtype=float)
     dy = np.full_like(ypos, 0.55, dtype=float)
 
-    ax.bar3d(xpos, ypos, zpos, dx, dy, dz, shade=True, alpha=0.82)
-    ax.set_title("3D 출원 분포: 국가코드 x 출원인 x 출원건수", pad=20, fontweight="bold")
+    ax.bar3d(xpos, ypos, zpos, dx, dy, dz, shade=True, alpha=0.85)
+    ax.set_title("3D 출원 분포: 국가코드 x 출원인 x 출원건수", pad=20)
     ax.set_xlabel("국가코드", labelpad=12)
     ax.set_ylabel("출원인", labelpad=18)
     ax.set_zlabel("출원건수", labelpad=10)
     ax.set_xticks(np.arange(len(top_countries)) + 0.27)
     ax.set_xticklabels(top_countries)
     ax.set_yticks(np.arange(len(top_applicants)) + 0.27)
-    ax.set_yticklabels([shorten_label(name, 24) for name in top_applicants], fontsize=8)
+    ax.set_yticklabels([name[:24] for name in top_applicants], fontsize=8)
     ax.view_init(elev=28, azim=-48)
-    style_3d_axis(ax)
-
     return fig
 
 
@@ -719,7 +530,6 @@ def generate_country_detail_charts(
 ) -> None:
     """국가별 연도 추이 그래프를 반복 생성한다."""
     top_countries = country_counts.head(config.TOP_N_COUNTRIES)[config.COUNTRY_COL].tolist()
-    all_years = sorted(data["출원연도"].unique())
 
     for country in top_countries:
         subset = data[data[config.COUNTRY_COL] == country]
@@ -727,28 +537,12 @@ def generate_country_detail_charts(
 
         fig, ax = plt.subplots(figsize=config.FIGSIZE_MEDIUM)
         sns.lineplot(data=yearly, x="출원연도", y="출원건수", marker="o", linewidth=2.5, ax=ax)
-        ax.fill_between(yearly["출원연도"], yearly["출원건수"], alpha=0.12)
-        ax.set_xticks(all_years)
-
+        ax.set_title(f"국가코드 {country}: 연도별 PIM 출원 동향")
+        ax.set_xlabel("출원연도")
+        ax.set_ylabel("출원건수")
+        ax.set_xticks(sorted(data["출원연도"].unique()))
         for _, row in yearly.iterrows():
-            ax.text(
-                row["출원연도"],
-                row["출원건수"],
-                str(int(row["출원건수"])),
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                color="#444444",
-            )
-
-        polish_axes(
-            ax,
-            title=f"국가코드 {country}: 연도별 PIM/PNM 출원 동향",
-            subtitle="국가별 상세 추이 반복 생성 그래프",
-            xlabel="출원연도",
-            ylabel="출원 건수",
-            source="Data: WIPS 검색 결과 기반 자체 집계",
-        )
+            ax.text(row["출원연도"], row["출원건수"], str(int(row["출원건수"])), ha="center", va="bottom", fontsize=9)
 
         save_figure(fig, output_img_dir / "country_detail", f"country_{safe_filename(country)}_yearly_trend", pdf)
 
@@ -761,7 +555,6 @@ def generate_applicant_detail_charts(
 ) -> None:
     """상위 출원인별 연도 추이 그래프를 반복 생성한다."""
     top_applicants = applicant_counts.head(config.TOP_N_APPLICANTS)["출원인_정규화"].tolist()
-    all_years = sorted(data["출원연도"].unique())
 
     for applicant in top_applicants:
         subset = data[data["출원인_정규화"] == applicant]
@@ -769,28 +562,12 @@ def generate_applicant_detail_charts(
 
         fig, ax = plt.subplots(figsize=config.FIGSIZE_MEDIUM)
         sns.lineplot(data=yearly, x="출원연도", y="출원건수", marker="o", linewidth=2.5, ax=ax)
-        ax.fill_between(yearly["출원연도"], yearly["출원건수"], alpha=0.12)
-        ax.set_xticks(all_years)
-
+        ax.set_title(f"출원인별 연도 추이: {applicant[:45]}")
+        ax.set_xlabel("출원연도")
+        ax.set_ylabel("출원건수")
+        ax.set_xticks(sorted(data["출원연도"].unique()))
         for _, row in yearly.iterrows():
-            ax.text(
-                row["출원연도"],
-                row["출원건수"],
-                str(int(row["출원건수"])),
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                color="#444444",
-            )
-
-        polish_axes(
-            ax,
-            title=f"출원인별 연도 추이: {shorten_label(applicant, 45)}",
-            subtitle="상위 출원인별 상세 추이 반복 생성 그래프",
-            xlabel="출원연도",
-            ylabel="출원 건수",
-            source="Data: WIPS 검색 결과 기반 자체 집계",
-        )
+            ax.text(row["출원연도"], row["출원건수"], str(int(row["출원건수"])), ha="center", va="bottom", fontsize=9)
 
         save_figure(fig, output_img_dir / "applicant_detail", f"applicant_{safe_filename(applicant)}_yearly_trend", pdf)
 
@@ -826,51 +603,11 @@ def build_all_visuals(input_path: Path, output_dir: Path, sheet_name: Optional[s
             (plot_total_yearly_trend(tables["yearly_counts"]), "01_total_yearly_trend"),
             (plot_country_bar(tables["country_counts"]), "02_country_count_top"),
             (plot_applicant_bar(tables["applicant_counts"]), "03_applicant_count_top"),
-            (
-                plot_country_year_stacked_bar(
-                    tables["country_year_counts"],
-                    tables["country_counts"],
-                ),
-                "04_country_year_stacked_bar",
-            ),
-            (
-                plot_country_year_heatmap(
-                    tables["country_year_counts"],
-                    tables["country_counts"],
-                ),
-                "05_country_year_heatmap",
-            ),
-            (
-                plot_applicant_country_heatmap(
-                    tables["applicant_country_counts"],
-                    tables["applicant_counts"],
-                    tables["country_counts"],
-                ),
-                "06_applicant_country_heatmap",
-            ),
-            (
-                plot_3d_country_year(
-                    tables["country_year_counts"],
-                    tables["country_counts"],
-                ),
-                "07_3d_country_year",
-            ),
-            (
-                plot_3d_applicant_country(
-                    tables["applicant_country_counts"],
-                    tables["applicant_counts"],
-                    tables["country_counts"],
-                ),
-                "08_3d_applicant_country",
-            ),
-            (
-                plot_applicant_country_bubble(
-                    tables["applicant_country_counts"],
-                    tables["applicant_counts"],
-                    tables["country_counts"],
-                ),
-                "09_applicant_country_bubble",
-            ),
+            (plot_country_year_stacked_bar(tables["country_year_counts"], tables["country_counts"]), "04_country_year_stacked_bar"),
+            (plot_country_year_heatmap(tables["country_year_counts"], tables["country_counts"]), "05_country_year_heatmap"),
+            (plot_applicant_country_heatmap(tables["applicant_country_counts"], tables["applicant_counts"], tables["country_counts"]), "06_applicant_country_heatmap"),
+            (plot_3d_country_year(tables["country_year_counts"], tables["country_counts"]), "07_3d_country_year"),
+            (plot_3d_applicant_country(tables["applicant_country_counts"], tables["applicant_counts"], tables["country_counts"]), "08_3d_applicant_country"),
         ]
 
         for fig, filename in figures:
@@ -900,6 +637,7 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    apply_report_style()
     args = parse_args()
     build_all_visuals(
         input_path=Path(args.input),
